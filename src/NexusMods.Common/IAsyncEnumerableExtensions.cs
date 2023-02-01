@@ -15,4 +15,12 @@ public static class IAsyncEnumerableExtensions
             if (func(itm))
                 yield return itm;
     }
+
+    public static async IAsyncEnumerable<TOut> SelectMany<TIn, TOut>(this IEnumerable<TIn> coll,
+        Func<TIn, IAsyncEnumerable<TOut>> f, CancellationToken token = default)
+    {
+        foreach (var itm in coll)
+            await foreach (var innerItm in f(itm))
+                yield return innerItm;
+    }
 }

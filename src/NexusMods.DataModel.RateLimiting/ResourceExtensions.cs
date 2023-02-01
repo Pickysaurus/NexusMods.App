@@ -93,4 +93,43 @@ public static class ResourceExtensions
         await Task.WhenAll(tasks);
     }
     
+    public static async IAsyncEnumerable<TOut> Select<TResource, TItem, TOut>(this IResource<TResource, Size> resource, 
+        IEnumerable<TItem> src,
+        Func<TItem, Size> sizeFn, 
+        Func<IJob<Size>, TItem, ValueTask<TOut>> fn,
+        CancellationToken? token = null, 
+        string jobName = "Processing Files")
+    {
+        token ??= CancellationToken.None;
+        
+        var asList = src.OrderByDescending(sizeFn).ToList();
+
+        var tasks = new List<Task<List<TOut>>>();
+        
+        var maxJobs = resource.MaxJobs;
+        
+        tasks.AddRange(Enumerable.Range(0, maxJobs).Select(i => Task.Run(async () =>
+        {
+            var totalSize = SkipItems(asList, i, maxJobs)
+                .Aggregate(Size.Zero, (acc, i) => acc + sizeFn(i));
+            
+            using var job = await resource.Begin(jobName, totalSize, token.Value);
+            var list = new List<TOut>();
+
+            foreach (var itm in SkipItems(asList, i, maxJobs))
+            {
+                list.Add(await fn(job, itm));
+            }
+            return list;
+        })));
+
+        foreach (var result in tasks)
+        {
+            foreach (var itm in (await result))
+            {
+                yield return itm;
+            }
+        }
+    }
+    
 }

@@ -9,6 +9,8 @@ public class SignatureChecker
 
     private static Dictionary<Extension, FileType> _extensions =
         Definitions.Extensions.ToDictionary(x => x.Item2, x => x.Item1);
+    
+    public int LongestSignature => _maxLength;
 
     public SignatureChecker(params FileType[] types)
     {
@@ -32,9 +34,13 @@ public class SignatureChecker
         return lst;
     }
 
-    private static bool AreEqual(IReadOnlyList<byte> a, IEnumerable<byte> b)
+    private static bool AreEqual(Span<byte> buffer, Span<byte> signature)
     {
-        return !b.Where((t, i) => a[i] != t).Any();
+        if (signature.Length < buffer.Length) return false;
+        for (var i = 0; i < buffer.Length; i++)
+            if (buffer[i] != signature[i])
+                return false;
+        return true;
     }
     
     public bool TryGetFileType(Extension extension, out FileType fileType)

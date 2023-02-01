@@ -13,7 +13,8 @@ using NexusMods.DataModel.Sorting;
 using NexusMods.DataModel.Sorting.Rules;
 using NexusMods.Interfaces;
 using NexusMods.Paths;
-
+using NexusMods.Common;
+    
 namespace NexusMods.DataModel.Loadouts;
 
 public class LoadoutManager
@@ -27,6 +28,7 @@ public class LoadoutManager
     private readonly FileContentsCache _analyzer;
     private readonly IEnumerable<IFileMetadataSource> _metadataSources;
     private readonly ILookup<GameDomain,ITool> _tools;
+    private readonly IResource<LoadoutManager, Size> _limiter;
 
     public LoadoutManager(ILogger<LoadoutManager> logger,
         IResource<LoadoutManager, Size> limiter,
@@ -49,6 +51,7 @@ public class LoadoutManager
         _analyzer = analyzer;
         _tools = tools.SelectMany(t => t.Domains.Select(d => (Tool: t, Domain: d)))
             .ToLookup(t => t.Domain, t => t.Tool);
+        _limiter = limiter;
     }
 
     public IResource<LoadoutManager,Size> Limiter { get; set; }
@@ -81,26 +84,36 @@ public class LoadoutManager
                 
         _logger.LogInformation("Loadout {Name} {Id} created", name, n.LoadoutId);
         _logger.LogInformation("Adding game files");
+
+        var nextItems = await installation.Locations
+            .SelectMany(location => FileHashCache.IndexFolder(location.Value, token)
+                .Select(i => (Entry: i, Type: location.Key, RootPath: location.Value)), token)
+            .ToList();
         
-        foreach (var (type, path) in installation.Locations)
+        _logger.LogInformation("Indexing Game Files");
+
+        var processed =  await _limiter.Select(nextItems, x => x.Entry.Size, async (job, itm) =>
         {
-            await foreach (var result in FileHashCache.IndexFolder(path, token).WithCancellation(token))
+            var analysis = await _analyzer.AnalyzeFile(itm.Entry.Path, token);
+            var file = new GameFile
             {
-                var analysis = await _analyzer.AnalyzeFile(result.Path, token);
-                var file = new GameFile
-                {
-                    Id = ModFileId.New(),
-                    To = new GamePath(type, result.Path.RelativeTo(path)),
-                    Installation = installation,
-                    Hash = result.Hash,
-                    Size = result.Size,
-                    Store = _store
-                };
+                Id = ModFileId.New(),
+                To = new GamePath(itm.Type, itm.Entry.Path.RelativeTo(itm.RootPath)),
+                Installation = installation,
+                Hash = itm.Entry.Hash,
+                Size = itm.Entry.Size,
+                Store = _store
+            };
                 
-                var metaData = await GetMetadata(n, mod, file, analysis).ToHashSet();
-                gameFiles.Add(file with {Metadata = metaData.ToImmutableHashSet()});
-            }
-        }
+            var metaData = await GetMetadata(n, mod, file, analysis).ToHashSet();
+            file = file with {Metadata = metaData.ToImmutableHashSet()};
+            file.EnsureStored();
+            await job.Report(file.Size, token);
+            return file;
+        }, token).ToList();
+        
+        gameFiles.AddRange(processed);
+
         gameFiles.AddRange(installation.Game.GetGameFiles(installation, _store));
         var marker = new LoadoutMarker(this, n.LoadoutId);
         marker.Alter(mod.Id, m => m with {Files = m.Files.With(gameFiles, f => f.Id)});
